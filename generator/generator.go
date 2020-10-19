@@ -3,9 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math"
-	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -20,6 +19,7 @@ var (
 	remoteaddr *net.UDPAddr
 	localaddr  *net.UDPAddr
 	wg         sync.WaitGroup
+	metrics    []byte
 )
 
 func main() {
@@ -49,6 +49,20 @@ func main() {
 		}
 	}
 
+	tail := flag.Args()
+	if len(tail) == 0 {
+		panic("usage: " + os.Args[0] + " [-options] key value [key value ...]")
+	}
+	if len(tail)%2 != 0 {
+		panic("uneven arguments number")
+	}
+
+	tm := time.Now().Unix()
+	for i := 0; i < len(tail); i += 2 {
+		s := fmt.Sprintf("%s %s %d\n", tail[i], tail[i+1], tm)
+		metrics = append(metrics, s...)
+	}
+
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go sender(&wg)
@@ -64,11 +78,8 @@ func sender(wg *sync.WaitGroup) {
 	}
 	defer conn.Close()
 
-	val := math.Floor(rand.Float64()*100.0) + 10.0
-	tm := time.Now().Unix()
-	m1 := []byte(fmt.Sprintf("%s %g %d\n%s %g %d\n", prefix+".avg.aaa", val, tm, prefix+".count.total", 1.0, tm))
 	for i := 0; i < count; i++ {
-		_, err := conn.Write(m1)
+		_, err := conn.Write(metrics)
 		if err != nil {
 			fmt.Println(err)
 		}

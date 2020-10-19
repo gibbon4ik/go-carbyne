@@ -8,7 +8,8 @@ import (
 	"golang.org/x/sys/unix"
 	"net"
 	"os"
-	"runtime"
+	"os/signal"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ var (
 	localaddr  *net.UDPAddr
 	sumchannel = make(chan metrics, maxworkers)
 	err        error
+	run        bool = true
 )
 
 func main() {
@@ -47,6 +49,7 @@ func main() {
 	flag.StringVar(&listen, "l", ":2023", "Listen on host:port")
 	flag.StringVar(&remote, "r", "", "Send udp to host:port")
 	flag.IntVar(&interval, "i", 60, "Interval is seconds between aggregate data dump")
+	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to file")
 	flag.Parse()
 
 	if listen == "" {
@@ -70,14 +73,32 @@ func main() {
 		panic(err)
 	}
 
-	runtime.GOMAXPROCS(workers + 1)
+	//runtime.GOMAXPROCS(workers + 1)
+
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			panic(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		run = false
+	}()
+
 	fmt.Fprintln(os.Stderr, "Start", Service, Version)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go listener(listen, &wg, i)
 	}
-	go aggregator()
+	wg.Add(1)
+	go aggregator(&wg)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr, "Stop", Service, Version)
 }
@@ -121,18 +142,19 @@ func listener(listen string, wg *sync.WaitGroup, num int) {
 		return
 	}
 	defer conn.Close()
+	conn.(*net.UDPConn).SetReadBuffer(1024 * 1024)
 	buffer := make([]byte, 1500)
 	metrhash := make(metrics)
 	nextdump := time.Now().Add(time.Second).Unix()
 	conn.SetReadDeadline(time.Now().Add(time.Second))
-	for {
+	for run {
 		// sent metrics to aggregator every second
 		if time.Now().Unix() >= nextdump {
 			conn.SetReadDeadline(time.Now().Add(time.Second))
 			nextdump = time.Now().Add(time.Second).Unix()
-			if len(metrhash) > 0 {
+			if lastlen := len(metrhash); lastlen > 0 {
 				sumchannel <- metrhash
-				metrhash = make(metrics)
+				metrhash = make(metrics, lastlen)
 			}
 		}
 
@@ -157,20 +179,21 @@ func listener(listen string, wg *sync.WaitGroup, num int) {
 			if err != nil {
 				continue
 			}
-			tm, err := strconv.ParseInt(string(list[2]), 10, 64)
+			tm, err := strconv.Atoi(string(list[2]))
 			if err != nil {
 				continue
 			}
-			addpoint(metrhash, key, value, tm, 1)
+			addpoint(metrhash, key, value, int64(tm), 1)
 		}
 	}
+	sumchannel <- metrhash
 }
 
-func aggregator() {
+func aggregator(wg *sync.WaitGroup) {
 	allmetrics := make(metrics)
 	ticker := time.NewTicker(time.Second * time.Duration(interval))
-	defer ticker.Stop()
-	for {
+	defer wg.Done()
+	for run {
 		select {
 		case hash := <-sumchannel:
 			for key, v := range hash {
@@ -178,9 +201,12 @@ func aggregator() {
 			}
 		case <-ticker.C:
 			go dumper(allmetrics)
-			allmetrics = make(metrics)
+			lastlen := len(allmetrics)
+			allmetrics = make(metrics, lastlen)
 		}
 	}
+	ticker.Stop()
+	dumper(allmetrics)
 }
 
 func dumper(mhash metrics) {
