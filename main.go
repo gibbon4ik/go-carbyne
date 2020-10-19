@@ -204,7 +204,7 @@ func dumper(mhash metrics) {
 			s = fmt.Sprintln(key, v.value/float64(v.count), v.tm/int64(v.count))
 			//fmt.Println(key, v.value/float64(v.count), v.tm/int64(v.count))
 		}
-		if len(buffer)+len(s) > 1450 {
+		if len(buffer)+len(s) > maxmtu {
 			conn.Write(buffer)
 			buffer = buffer[:0]
 		}
@@ -213,7 +213,7 @@ func dumper(mhash metrics) {
 	for key, v := range allhash {
 		//fmt.Println(key, v.value, v.tm/int64(v.count))
 		s = fmt.Sprintln(key, v.value, v.tm/int64(v.count))
-		if len(buffer)+len(s) > 1450 {
+		if len(buffer)+len(s) > maxmtu {
 			conn.Write(buffer)
 			buffer = buffer[:0]
 		}
