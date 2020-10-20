@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	//"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -73,7 +75,8 @@ func main() {
 		panic(err)
 	}
 
-	//runtime.GOMAXPROCS(workers + 1)
+	runtime.GOMAXPROCS(workers + 2)
+	debug.SetGCPercent(10000)
 
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
@@ -136,13 +139,13 @@ func addpoint(hash metrics, key string, value float64, tm int64, count uint32) {
 func listener(listen string, wg *sync.WaitGroup, num int) {
 	defer wg.Done()
 	listenconfig := &net.ListenConfig{Control: setsocketoptions}
-	conn, err := listenconfig.ListenPacket(context.Background(), "udp", listen)
+	lp, err := listenconfig.ListenPacket(context.Background(), "udp", listen)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Listen error", err)
 		return
 	}
+	conn := lp.(*net.UDPConn)
 	defer conn.Close()
-	conn.(*net.UDPConn).SetReadBuffer(1024 * 1024)
 	buffer := make([]byte, 1500)
 	metrhash := make(metrics)
 	nextdump := time.Now().Add(time.Second).Unix()
@@ -158,7 +161,7 @@ func listener(listen string, wg *sync.WaitGroup, num int) {
 			}
 		}
 
-		n, _, err := conn.ReadFrom(buffer)
+		n, err := conn.Read(buffer)
 		if err != nil {
 			if e, ok := err.(net.Error); !ok || !e.Timeout() {
 				fmt.Fprintf(os.Stderr, "udp read error %s", err)
@@ -166,24 +169,42 @@ func listener(listen string, wg *sync.WaitGroup, num int) {
 			continue
 		}
 
-		for _, s := range bytes.Split(buffer[0:n], []byte("\n")) {
-			if len(s) == 0 {
-				continue
+		str := string(buffer[0:n])
+		var key string
+		var value float64
+		var tm int
+
+		lastind := 0
+		ind := 0
+		pos := 0
+
+		for ind < n {
+			switch str[ind] {
+			case ' ':
+				if pos == 0 {
+					key = str[lastind:ind]
+				}
+				if pos == 1 {
+					value, err = strconv.ParseFloat(str[lastind:ind], 64)
+				}
+				if pos == 2 {
+					tm, err = strconv.Atoi(str[lastind:ind])
+				}
+				lastind = ind + 1
+				pos++
+
+			case '\n':
+				if pos == 2 {
+					tm, err = strconv.Atoi(str[lastind:ind])
+					pos++
+				}
+				if pos == 3 {
+					addpoint(metrhash, key, value, int64(tm), 1)
+				}
+				lastind = ind + 1
+				pos = 0
 			}
-			list := bytes.SplitN(s, []byte(" "), 3)
-			if len(list) < 3 {
-				continue
-			}
-			key := string(list[0])
-			value, err := strconv.ParseFloat(string(list[1]), 64)
-			if err != nil {
-				continue
-			}
-			tm, err := strconv.Atoi(string(list[2]))
-			if err != nil {
-				continue
-			}
-			addpoint(metrhash, key, value, int64(tm), 1)
+			ind++
 		}
 	}
 	sumchannel <- metrhash
